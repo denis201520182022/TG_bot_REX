@@ -87,8 +87,79 @@ services:
       - postgres_db
       - redis
       - rabbitmq
+  # --- МОНИТОРИНГ ---
+
+  # 8. Loki (База данных логов)
+  loki:
+    image: grafana/loki:2.9.2
+    container_name: rex_loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./monitoring/loki-config.yaml:/etc/loki/local-config.yaml
+    restart: always
+
+  # 9. Promtail (Агент сбора логов)
+  promtail:
+    image: grafana/promtail:2.9.2
+    container_name: rex_promtail
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro # Читает логи докера
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./monitoring/promtail-config.yaml:/etc/promtail/config.yaml
+    command: -config.file=/etc/promtail/config.yaml
+    restart: always
+    depends_on:
+      - loki
+
+  # 10. Prometheus (Сбор метрик)
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: rex_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    restart: always
+
+  # 11. cAdvisor (Метрики контейнеров: CPU, RAM)
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.47.2
+    container_name: rex_cadvisor
+    ports:
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    restart: always
+    # Если ты на Windows, cadvisor может капризничать, но в WSL2 обычно работает.
+    # Если не запустится - не критично для старта, просто не будет графиков CPU.
+
+  # 12. Grafana (Дашборды)
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: rex_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin # Пароль для входа (логин admin)
+    volumes:
+      - grafana_data:/var/lib/grafana
+    restart: always
+    depends_on:
+      - prometheus
+      - loki
+
+
 
 volumes:
   postgres_data:
   rabbit_data:
   redis_data:
+  prometheus_data:
+  grafana_data:
