@@ -1,27 +1,94 @@
-version: '3.8'
-
 services:
-  # Брокер сообщений (Очереди)
+  # --- ИНФРАСТРУКТУРА ---
+  
+  # 1. База данных (Postgres)
+  postgres_db:
+    image: postgres:15-alpine
+    container_name: rex_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-rex_db}
+    ports:
+      - "5432:5432" # Чтобы можно было подключиться через DBeaver снаружи
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # 2. Очереди (RabbitMQ)
   rabbitmq:
     image: rabbitmq:3-management
     container_name: rex_rabbitmq
+    restart: always
     ports:
-      - "5672:5672"   # Для кода
-      - "15672:15672" # Веб-админка (логин/пароль: guest/guest)
+      - "5672:5672"
+      - "15672:15672"
     volumes:
       - rabbit_data:/var/lib/rabbitmq
-    restart: always
 
-  # Кэш и FSM
+  # 3. Кэш (Redis)
   redis:
     image: redis:7-alpine
     container_name: rex_redis
+    restart: always
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
+
+  # --- ПРИЛОЖЕНИЕ (PYTHON) ---
+
+  # 4. Бот (Frontend)
+  bot_polling:
+    build: .
+    container_name: rex_bot
     restart: always
+    command: python -m src.bot.main
+    env_file:
+      - .env
+    depends_on:
+      - postgres_db
+      - redis
+      - rabbitmq
+
+  # 5. AI Worker (Обработка GPT)
+  worker_ai:
+    build: .
+    container_name: rex_worker_ai
+    restart: always
+    command: python -m src.workers.ai_worker
+    env_file:
+      - .env
+    depends_on:
+      - postgres_db
+      - redis
+      - rabbitmq
+
+  # 6. Sender Worker (Отправка сообщений)
+  worker_sender:
+    build: .
+    container_name: rex_worker_sender
+    restart: always
+    command: python -m src.workers.sender_worker
+    env_file:
+      - .env
+    depends_on:
+      - rabbitmq
+
+  # 7. Scheduler (Планировщик)
+  worker_scheduler:
+    build: .
+    container_name: rex_scheduler
+    restart: always
+    command: python -m src.workers.scheduler
+    env_file:
+      - .env
+    depends_on:
+      - postgres_db
+      - redis
+      - rabbitmq
 
 volumes:
-  redis_data:
+  postgres_data:
   rabbit_data:
+  redis_data:

@@ -11,6 +11,7 @@ migrations/versions/
 # OS
 Thumbs.db
 Desktop.ini
+.env.docker
 
 # Docker
 .docker_data/
