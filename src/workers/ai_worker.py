@@ -18,49 +18,31 @@ from src.services.rabbit import send_to_queue
 
 # --- ФУНКЦИЯ ОЧИСТКИ И ФОРМАТИРОВАНИЯ HTML ---
 def clean_html_for_telegram(text: str) -> str:
-    """
-    Превращает веб-HTML от ИИ в Telegram-HTML.
-    """
-    # 1. Убираем обертки Markdown кода
+    """Превращает веб-HTML от ИИ в Telegram-HTML."""
     text = re.sub(r'```html', '', text, flags=re.IGNORECASE)
     text = re.sub(r'```', '', text)
-
-    # 2. Вырезаем служебные теги
     text = re.sub(r'<!DOCTYPE[^>]*>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'<html[^>]*>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'</html>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'<head>.*?</head>', '', text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r'<body[^>]*>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'</body>', '', text, flags=re.IGNORECASE)
-
-    # 3. СПИСКИ С ОТСТУПОМ
-    # Удаляем ul/ol
     text = re.sub(r'<ul[^>]*>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'</ul>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'<ol[^>]*>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'</ol>', '', text, flags=re.IGNORECASE)
-    
-    # <li> превращаем в: Перенос строки + 3 пробела + Точка
-    # Это создаст эффект табуляции
     text = re.sub(r'<li[^>]*>', '\n   • ', text, flags=re.IGNORECASE)
     text = re.sub(r'</li>', '', text, flags=re.IGNORECASE)
-
-    # 4. Обработка параграфов
     text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
     text = re.sub(r'</p>', '\n\n', text, flags=re.IGNORECASE)
     text = re.sub(r'<p[^>]*>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'</div>', '\n', text, flags=re.IGNORECASE)
     text = re.sub(r'<div[^>]*>', '', text, flags=re.IGNORECASE)
-
-    # 5. Заголовки -> жирный
     text = re.sub(r'<h[1-6][^>]*>', '\n<b>', text, flags=re.IGNORECASE)
     text = re.sub(r'</h[1-6]>', '</b>\n', text, flags=re.IGNORECASE)
-
-    # 6. Чистка мусора
     text = re.sub(r'<span[^>]*>', '', text, flags=re.IGNORECASE)
     text = re.sub(r'</span>', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\n{3,}', '\n\n', text) # Убираем лишние пустые строки
-    
+    text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
 async def process_task(message: aio_pika.IncomingMessage):
@@ -73,20 +55,17 @@ async def process_task(message: aio_pika.IncomingMessage):
         answers = task['answers']
         survey_db_id = task['survey_id']
 
-        # 1. Получаем промпт
         prompt_template = await redis_service.get_prompt(mode)
         if not prompt_template:
             print(f"❌ Нет промпта для режима {mode}")
             return
         
-        # 2. Подстановка переменных
         try:
             system_text = prompt_template.format(**answers)
         except Exception as e:
             print(f"⚠️ JSON injection: {e}")
             system_text = prompt_template + f"\n\nДанные: {json.dumps(answers, ensure_ascii=False)}"
 
-        # 3. ОБНОВЛЕННАЯ ИНСТРУКЦИЯ ДЛЯ ИИ
         user_content = (
             "Составь рекомендацию на основе моих данных.\n"
             "ТРЕБОВАНИЯ К ОФОРМЛЕНИЮ:\n"
@@ -99,11 +78,8 @@ async def process_task(message: aio_pika.IncomingMessage):
         )
         
         ai_result = await generate_response(system_text, user_content)
-        
-        # 4. Очистка и добавление отступов
         clean_result = clean_html_for_telegram(ai_result)
         
-        # 5. Сборка сообщения
         final_text = (
             f"✅ <b>Ваши рекомендации ({mode}) готовы!</b>\n\n"
             f"<blockquote expandable>{clean_result}</blockquote>\n\n"
@@ -111,30 +87,16 @@ async def process_task(message: aio_pika.IncomingMessage):
             "⚠️ <i><b>Важно:</b> Рекомендации носят информационный характер.</i>"
         )
         
-        # 6. Сохраняем
         async with async_session_maker() as session:
             stmt = update(UserSurvey).where(UserSurvey.id == survey_db_id).values(ai_recommendation=clean_result)
             await session.execute(stmt)
             await session.commit()
 
-        # 7. Отправка результата
+        # ОТПРАВЛЯЕМ ТОЛЬКО РЕЗУЛЬТАТ
+        # Блок с кнопками "tracking_subscribe" удален, т.к. этот вопрос теперь задается в survey.py
         await send_to_queue("q_notifications", {
             "user_id": user_id,
             "text": final_text
-        })
-        
-        # 8. Отправка предложения о трекинге
-        tracking_keyboard = {
-            "inline_keyboard": [[
-                {"text": "👍 Да, давай!", "callback_data": "tracking_subscribe"},
-                {"text": "👎 Нет, спасибо", "callback_data": "tracking_unsubscribe"}
-            ]]
-        }
-        await asyncio.sleep(1)
-        await send_to_queue("q_notifications", {
-            "user_id": user_id,
-            "text": "Хотите, чтобы я каждый день спрашивал о ваших успехах?",
-            "keyboard": tracking_keyboard
         })
 
 async def main():

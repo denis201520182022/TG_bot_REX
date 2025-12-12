@@ -1,4 +1,4 @@
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
 def get_main_menu(qr_activations: int = 0) -> ReplyKeyboardMarkup:
     """
@@ -23,9 +23,8 @@ def get_main_menu(qr_activations: int = 0) -> ReplyKeyboardMarkup:
         row3.append(KeyboardButton(text="🌟 Натальная карта"))
 
     # Ряд 4: Сервисные кнопки
-    # "Справка" вместо "Поддержки"
+    # "Изменить анкету" УБРАЛИ. Осталась только справка.
     row4 = [
-        KeyboardButton(text="✏️ Изменить анкету"),
         KeyboardButton(text="ℹ️ Справка")
     ]
 
@@ -36,13 +35,10 @@ def get_main_menu(qr_activations: int = 0) -> ReplyKeyboardMarkup:
 
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
-        resize_keyboard=True, # Кнопки компактные
+        resize_keyboard=True,
         input_field_placeholder="Выберите режим в меню 👇"
     )
 
-# Для "отмены" внутри анкеты лучше оставить Inline (под сообщением), 
-# так как Reply-кнопки "Отмена" часто путаются с главным меню.
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 def get_cancel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Прервать анкету", callback_data="cancel_survey")]

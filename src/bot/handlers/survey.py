@@ -3,7 +3,11 @@ import datetime
 import asyncio
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    Message, CallbackQuery, 
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+)
 from aiogram.enums import ContentType
 from sqlalchemy import select
 
@@ -27,7 +31,7 @@ MENU_MAPPING = {
     "🌟 Натальная карта": "natal_chart"
 }
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИआई ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 async def show_main_menu(message: Message, text: str, user_id: int):
     """Показывает главное меню."""
@@ -37,24 +41,59 @@ async def show_main_menu(message: Message, text: str, user_id: int):
         if user: activations = user.qr_activations_count
     await message.answer(text, reply_markup=get_main_menu(qr_activations=activations))
 
-# --- ПРОМЕЖУТОЧНОЕ МЕНЮ (ДЛЯ ДИЕТОЛОГА/ТРЕНЕРА) ---
+def get_options_keyboard(options: list) -> ReplyKeyboardMarkup:
+    """Генерирует клавиатуру с вариантами ответов."""
+    keyboard = []
+    row = []
+    for opt in options:
+        row.append(KeyboardButton(text=opt))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([KeyboardButton(text="❌ Отмена")])
+    
+    return ReplyKeyboardMarkup(
+        keyboard=keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        input_field_placeholder="Выберите вариант 👇"
+    )
+
+# --- ХЕНДЛЕР СПРАВКИ ---
+
+@router.message(F.text.contains("Справка"))
+async def show_help(message: Message):
+    help_text = (
+        "🤖 <b>Как пользоваться ботом REX:</b>\n\n"
+        "1. <b>Выберите режим</b> в меню внизу.\n"
+        "2. <b>Ответьте на вопросы</b> анкеты.\n"
+        "3. <b>Получите результат:</b>\n"
+        "   — 🥦/💪 План питания или тренировок.\n"
+        "   — 🔮 Гороскоп на сегодня.\n"
+        "   — ❤️ Поиск партнера (подбор в 12:00).\n\n"
+        "📅 <b>Ежедневный трекинг:</b>\n"
+        "Мы будем спрашивать о ваших успехах в 20:00.\n"
+        "Включить/выключить его можно в меню Диетолога или Тренера."
+    )
+    await message.answer(help_text)
+
+# --- ПРОМЕЖУТОЧНОЕ МЕНЮ ---
 
 def get_mode_menu_kb(mode: str, is_tracking_on: bool) -> InlineKeyboardMarkup:
-    """Генерирует меню для режима 'Диетолог' или 'Тренер'."""
     tracking_text = "✅ Трекинг ВКЛ" if is_tracking_on else "❌ Трекинг ВЫКЛ"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📝 Заполнить/обновить анкету", callback_data=f"start_survey_{mode}")],
         [InlineKeyboardButton(text=tracking_text, callback_data=f"toggle_tracking_{mode}")]
     ])
 
-# Хендлер для кнопок "Диетолог" и "Тренер" в главном меню
 @router.message(F.text.in_(["🥦 Диетолог", "💪 Тренер"]))
 async def show_mode_menu(message: Message):
     mode = MENU_MAPPING[message.text]
     async with async_session_maker() as session:
         user = await session.get(User, message.from_user.id)
-        if not user: return # На всякий случай
-        
+        if not user: return 
         is_tracking = user.is_diet_tracking if mode == 'diet' else user.is_trainer_tracking
     
     await message.answer(
@@ -62,36 +101,30 @@ async def show_mode_menu(message: Message):
         reply_markup=get_mode_menu_kb(mode, is_tracking)
     )
 
-# Обработчик кнопки вкл/выкл трекинг
 @router.callback_query(F.data.startswith("toggle_tracking_"))
 async def toggle_tracking(callback: CallbackQuery):
     mode = callback.data.split("_")[2]
-    new_status = False # Значение по умолчанию
-    
+    new_status = False 
     async with async_session_maker() as session:
         user = await session.get(User, callback.from_user.id)
-        
         if mode == 'diet':
             new_status = not user.is_diet_tracking
             user.is_diet_tracking = new_status
         elif mode == 'trainer':
             new_status = not user.is_trainer_tracking
             user.is_trainer_tracking = new_status
-            
         await session.commit()
     
     await callback.message.edit_reply_markup(reply_markup=get_mode_menu_kb(mode, new_status))
-    await callback.answer(f"Ежедневный трекинг {'включен' if new_status else 'выключен'}")
+    await callback.answer(f"Трекинг {'включен' if new_status else 'выключен'}")
 
 # --- ЗАПУСК АНКЕТЫ ---
 
-# 1. Запуск по ТЕКСТУ (Дейтинг, Астролог)
 @router.message(F.text.in_(["❤️ Найти партнера", "🔮 Астро-прогноз", "🌟 Натальная карта"]))
 async def start_survey_by_text(message: Message, state: FSMContext):
     mode = MENU_MAPPING[message.text]
     await _start_survey_logic(message, state, mode)
 
-# 2. Запуск по КНОПКЕ (из меню "Изменить анкету" или "Заполнить анкету")
 @router.callback_query(F.data.startswith(("mode_", "start_survey_")))
 async def start_survey_by_callback(callback: CallbackQuery, state: FSMContext):
     mode = callback.data.split("_")[-1]
@@ -107,18 +140,32 @@ async def _start_survey_logic(message: Message, state: FSMContext, mode: str):
     await state.update_data(survey_mode=mode, current_step=0, answers={})
     
     first_q = questions[0]
+    kb = None
+    if first_q['type'] == 'button' and first_q.get('options'):
+        kb = get_options_keyboard(first_q['options'])
+    else:
+        kb = get_cancel_kb()
+
     await message.answer(
         f"📝 <b>Режим: {mode.upper()}</b>\n\nВопрос 1/{len(questions)}:\n{first_q['text']}", 
-        reply_markup=get_cancel_kb()
+        reply_markup=kb
     )
 
-# --- ОТМЕНА, ОБРАБОТКА ОТВЕТОВ, СОГЛАСИЕ ---
+# --- ОТМЕНА ---
 
 @router.callback_query(F.data == "cancel_survey", SurveyState.in_progress)
-async def cancel_survey(callback: CallbackQuery, state: FSMContext):
+async def cancel_survey_callback(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("❌ Анкета прервана.")
     await show_main_menu(callback.message, "Выберите режим:", callback.from_user.id)
+
+@router.message(F.text == "❌ Отмена", SurveyState.in_progress)
+async def cancel_survey_text(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Анкета прервана.", reply_markup=ReplyKeyboardRemove())
+    await show_main_menu(message, "Выберите режим:", message.from_user.id)
+
+# --- ПОШАГОВАЯ ОБРАБОТКА ВОПРОСОВ ---
 
 @router.message(SurveyState.in_progress, F.content_type.in_([ContentType.TEXT, ContentType.PHOTO]))
 async def process_answer(message: Message, state: FSMContext):
@@ -127,7 +174,7 @@ async def process_answer(message: Message, state: FSMContext):
     
     questions = await redis_service.get_survey_config(mode)
     if not questions:
-        await message.answer("Ошибка конфигурации.")
+        await message.answer("Ошибка конфигурации. Попробуйте позже.")
         await state.clear()
         return
 
@@ -135,16 +182,18 @@ async def process_answer(message: Message, state: FSMContext):
     answer_value = None
 
     if current_q['type'] == 'photo':
-        if not message.photo: return await message.answer("📸 Пожалуйста, отправьте фото.")
+        if not message.photo: 
+            return await message.answer("📸 Пожалуйста, отправьте фотографию (не файлом).")
         answer_value = message.photo[-1].file_id
     else: 
-        if not message.text: return await message.answer("✍️ Введите текст.")
+        if not message.text: 
+            return await message.answer("✍️ Пожалуйста, введите текстовый ответ.")
         user_text = message.text.strip()
         if current_q['key'] == 'birth_date':
             try:
                 datetime.datetime.strptime(user_text, "%d.%m.%Y").date()
             except ValueError:
-                return await message.answer("❗️Неверный формат: ДД.ММ.ГГГГ")
+                return await message.answer("❗️Неверный формат. Введите дату как ДД.ММ.ГГГГ")
         answer_value = user_text
 
     answers[current_q['key']] = answer_value
@@ -153,25 +202,39 @@ async def process_answer(message: Message, state: FSMContext):
     if next_step < len(questions):
         await state.update_data(current_step=next_step, answers=answers)
         next_q = questions[next_step]
-        text = f"Вопрос {next_step + 1}/{len(questions)}:\n{next_q['text']}"
-        if next_q.get('options'): text += f"\n\n(Варианты: {', '.join(next_q['options'])})"
-        await message.answer(text, reply_markup=get_cancel_kb())
+        
+        kb = None
+        if next_q['type'] == 'button' and next_q.get('options'):
+            kb = get_options_keyboard(next_q['options'])
+        else:
+            kb = get_cancel_kb()
+
+        await message.answer(
+            f"Вопрос {next_step + 1}/{len(questions)}:\n{next_q['text']}", 
+            reply_markup=kb
+        )
     else:
+        # ВОПРОСЫ ЗАКОНЧИЛИСЬ
         await state.update_data(answers=answers)
         await state.set_state(SurveyState.final_consent)
+        
         consent_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Согласен(а)", callback_data="consent_yes")],
             [InlineKeyboardButton(text="❌ Отказаться", callback_data="consent_no")]
         ])
+        
+        await message.answer("...", reply_markup=ReplyKeyboardRemove()) # Убираем Reply клаву
         await message.answer(
-            "📄 <b>Согласие на обработку данных:</b>\n\nПодтвердите согласие на обработку персональных данных для работы сервиса.",
+            "📄 <b>Согласие на обработку данных:</b>\n\n"
+            "Нажимая кнопку «Согласен(а)», вы подтверждаете свое согласие на обработку персональных данных.",
             reply_markup=consent_kb
         )
+
+# --- ОБРАБОТКА СОГЛАСИЯ (ФИНАЛ) ---
 
 @router.callback_query(SurveyState.final_consent, F.data.in_(["consent_yes", "consent_no"]))
 async def process_consent(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_reply_markup(reply_markup=None)
-    
     user_id = callback.from_user.id
     
     if callback.data == "consent_no":
@@ -184,29 +247,36 @@ async def process_consent(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     
     async with async_session_maker() as session:
-        # Проверяем, первая ли это анкета для данного режима
-        stmt = select(UserSurvey).where(UserSurvey.user_id == user_id, UserSurvey.mode == mode)
-        is_first_survey = not (await session.execute(stmt)).scalar_one_or_none()
+        # 1. Получаем пользователя для проверки трекинга
+        user = await session.get(User, user_id)
+        
+        # Определяем, включен ли трекинг
+        is_tracking_enabled = False
+        if mode == 'diet': is_tracking_enabled = user.is_diet_tracking
+        elif mode == 'trainer': is_tracking_enabled = user.is_trainer_tracking
 
-        # Сохраняем ответы
+        # 2. Сохраняем анкету
         new_survey = UserSurvey(user_id=user_id, mode=mode, survey_config_id=1, answers=answers)
         session.add(new_survey)
         await session.flush()
         new_survey_id = new_survey.id
         await session.commit()
     
-    # Распределяем логику по режимам
+    # --- ЛОГИКА ПОСЛЕ АНКЕТЫ ---
     if mode in ['diet', 'trainer', 'natal_chart']:
         await callback.message.answer(f"✅ <b>Принято!</b>\nИИ анализирует данные... ⏳")
+        
+        # Отправляем в AI
         task_data = {"user_id": user_id, "mode": mode, "answers": answers, "survey_id": new_survey_id}
         await send_to_queue("q_ai_generation", task_data)
         
-        if is_first_survey and mode in ['diet', 'trainer']:
-            tracking_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="👍 Да, хочу следить за прогрессом!", callback_data=f"toggle_tracking_{mode}")],
-                [InlineKeyboardButton(text="👎 Нет, спасибо", callback_data="ignore")] # Кнопка-пустышка
-            ])
-            await asyncio.sleep(1)
+        # ПРЕДЛАГАЕМ ТРЕКИНГ, если он ВЫКЛЮЧЕН (независимо от того, какая это по счету анкета)
+        if mode in ['diet', 'trainer'] and not is_tracking_enabled:
+            tracking_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="👍 Да, хочу!", callback_data=f"toggle_tracking_{mode}"),
+                InlineKeyboardButton(text="👎 Не сейчас", callback_data="ignore")
+            ]])
+            await asyncio.sleep(1) # Небольшая пауза перед вопросом
             await callback.message.answer(
                 "Хотите, чтобы я каждый день в 20:00 спрашивал о ваших успехах в этом режиме?",
                 reply_markup=tracking_kb
@@ -216,6 +286,7 @@ async def process_consent(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("✅ <b>Анкета знакомств сохранена!</b>\nЖдите предложений в 12:00.")
         
     elif mode == 'horoscope':
+        # Логика гороскопа
         await callback.message.answer("✅ <b>Данные приняты!</b>\nИщу прогноз...")
         try:
             birth_date = datetime.datetime.strptime(answers.get("birth_date"), "%d.%m.%Y").date()
@@ -223,19 +294,19 @@ async def process_consent(callback: CallbackQuery, state: FSMContext):
             horoscope_text = await redis_service.get_horoscope(user_sign)
             
             if not horoscope_text:
-                await callback.message.answer("✨ Гороскопы на сегодня еще формируются. Попробуйте через пару минут!")
+                await callback.message.answer("✨ Гороскопы формируются. Попробуйте через пару минут!")
             else:
                 sign_name = RUS_SIGNS[user_sign]
                 await callback.message.answer(f"🔮 <b>Гороскоп для знака {sign_name}:</b>\n\n{horoscope_text}")
         except Exception as e:
             print(f"Ошибка гороскопа: {e}")
-            await callback.message.answer("Произошла ошибка при получении прогноза.")
+            await callback.message.answer("Ошибка даты. Используйте формат ДД.ММ.ГГГГ")
 
     await show_main_menu(callback.message, "🏠 Главное меню:", user_id)
     await callback.answer()
 
-# Хендлер для кнопки-пустышки
 @router.callback_query(F.data == "ignore")
 async def ignore_callback(callback: CallbackQuery):
-    await callback.message.delete()
+    try: await callback.message.delete()
+    except: pass
     await callback.answer()
