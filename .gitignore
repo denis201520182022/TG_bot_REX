@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+.idea/
+.vscode/
+*.log
+migrations/versions/
+# OS
+Thumbs.db
+Desktop.ini
+
+# Docker
+.docker_data/
+
+README.md
+qr_codes_BATCH_001_TEST.csv
+google_key.json
