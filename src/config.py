@@ -1,32 +1,38 @@
+from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import SecretStr
 
 class Settings(BaseSettings):
-    # Telegram
+    # --- Telegram ---
     BOT_TOKEN: SecretStr
-    ADMIN_IDS: str  # Придет строкой "123,456", распарсим потом
+    ADMIN_IDS: str
 
-    # Database
-    DB_URL: str  # postgresql+asyncpg://...
-
-    # Redis & Rabbit
+    # --- Database & Infra ---
+    DB_URL: str
     REDIS_URL: str
     RABBIT_URL: str
 
-    # External APIs
-    QWEN_API_KEY: SecretStr
+    # --- Google ---
     GOOGLE_CREDENTIALS_FILE: str
     GOOGLE_SHEET_ID: str
 
-    # OpenAI & Proxy
+    # --- LLM ---
     OPENAI_API_KEY: SecretStr
+    # Делаем Qwen необязательным (Optional), чтобы не падало, если его нет
+    QWEN_API_KEY: Optional[SecretStr] = None 
+    
+    # --- Proxy ---
     SQUID_PROXY_HOST: str
     SQUID_PROXY_PORT: str
     SQUID_PROXY_USER: str
     SQUID_PROXY_PASSWORD: str
 
-    # Читаем из файла .env
-    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8')
+    # --- Конфигурация Pydantic ---
+    model_config = SettingsConfigDict(
+        env_file='.env', 
+        env_file_encoding='utf-8',
+        # ВАЖНО: 'ignore' говорит Pydantic'у игнорировать лишние переменные от Докера
+        extra='ignore' 
+    )
 
-# Создаем экземпляр настроек, который будем импортировать везде
 settings = Settings()

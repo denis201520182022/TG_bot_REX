@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import sys
 import datetime
 from os.path import abspath, dirname
@@ -7,13 +6,12 @@ from os.path import abspath, dirname
 # Пути
 sys.path.insert(0, dirname(dirname(dirname(abspath(__file__)))))
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, Router, F
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.filters import CommandStart, CommandObject
 from aiogram.types import Message
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-import structlog
 
 from src.config import settings
 from src.database.session import async_session_maker
@@ -21,19 +19,35 @@ from src.database.models import User, QRCode
 from sqlalchemy import select
 from src.services.redis import redis_client
 
+# --- OBSERVABILITY ---
+from src.utils.logger import logger
+from src.utils.metrics import start_metrics_server, USER_UPDATES
+from src.utils.alerting import send_alert
+
 # ИМПОРТЫ РОУТЕРОВ
 from src.bot.keyboards.menu import get_main_menu
 from src.bot.handlers import survey as survey_router
 from src.bot.handlers import dating as dating_router
 from src.bot.handlers import tracking as tracking_router
 from src.bot.handlers import profile as profile_router 
+from src.bot.handlers import admin as admin_router
 
-structlog.configure(processors=[structlog.processors.JSONRenderer()])
-logger = structlog.get_logger()
+from src.bot.middlewares.check_sub import CheckSubscriptionMiddleware
+
+# Хелпер для проверки админа
+def is_admin(user_id: int) -> bool:
+    try:
+        admin_ids = [int(x) for x in settings.ADMIN_IDS.split(',')]
+        return user_id in admin_ids
+    except:
+        return False
 
 async def start_handler(message: Message, command: CommandObject):
-    args = command.args # То, что после /start
+    args = command.args 
     user_id = message.from_user.id
+    
+    log = logger.bind(user_id=user_id, command="start")
+    USER_UPDATES.labels(type="command_start").inc()
     
     async with async_session_maker() as session:
         # 1. Проверяем или создаем юзера
@@ -49,47 +63,67 @@ async def start_handler(message: Message, command: CommandObject):
             )
             session.add(user)
             await session.commit()
-            logger.info("new_user_registered", user_id=user_id)
+            log.info("new_user_registered")
 
-        # 2. Если есть аргумент (QR код)
+        # --- ЛОГИКА ДЛЯ АДМИНА (Full Access) ---
+        if is_admin(user_id):
+            menu_kb = get_main_menu(natal_credits=999, is_admin=True) # Админу даем визуально 999
+            await message.answer(
+                "👋 Привет, Админ! У вас полный доступ без ограничений.", 
+                reply_markup=menu_kb
+            )
+            return
+        # ---------------------------------------
+
+        # Получаем меню для обычного юзера
+        menu_kb = get_main_menu(
+            natal_credits=user.natal_chart_credits, # <--- ИСПРАВЛЕНО
+            is_admin=False
+        )
+
+        # 2. Активация QR кода
         if args:
             qr_hash = args
-            # Ищем код в базе
             q_stmt = select(QRCode).where(QRCode.code_hash == qr_hash)
             q_res = await session.execute(q_stmt)
             qr = q_res.scalar_one_or_none()
 
             # --- БЛОК ПРОВЕРОК ---
             if not qr:
+                log.warning("invalid_qr_attempt", code_hash=qr_hash)
                 await message.answer("❌ Неверный QR-код.")
                 return
 
             if not qr.is_active:
+                log.warning("inactive_qr_attempt", code_hash=qr_hash)
                 await message.answer("❌ Этот код деактивирован администратором.")
                 return
 
             if qr.activated_at:
-                # Код уже кем-то активирован
                 if qr.activated_by_id == user_id:
                     await message.answer("ℹ️ Вы уже активировали этот код ранее.")
                 else:
+                    log.warning("duplicate_qr_usage_attempt", code_hash=qr_hash)
                     await message.answer("❌ Этот код уже использован другим пользователем.")
                 
-                # Показываем меню (передаем счетчик для кнопки Натальной карты)
-                await message.answer("🏠 Главное меню:", reply_markup=get_main_menu(qr_activations=user.qr_activations_count))
+                await message.answer("🏠 Главное меню:", reply_markup=menu_kb)
                 return
             
             # --- АКТИВАЦИЯ ---
             now = datetime.datetime.now(datetime.timezone.utc)
-            
-            # Обновляем QR
             qr.activated_at = now
             qr.activated_by_id = user_id
-            
-            # Логика счетчика
             user.qr_activations_count += 1
             
-            # Обновляем Подписку Юзера
+            # Логика начисления КРЕДИТОВ (каждый 3-й код)
+            bonus_msg = ""
+            if user.qr_activations_count % 3 == 0:
+                user.natal_chart_credits += 1
+                bonus_msg = "\n\n🌟 <b>Бонус!</b> Вы получили 1 попытку для составления Натальной Карты!"
+            else:
+                bonus_msg = f"\n\n(Активируйте еще {3 - (user.qr_activations_count % 3)} шт., чтобы получить Натальную Карту)"
+
+            # Обновляем подписку
             if user.subscription_expires_at and user.subscription_expires_at > now:
                 user.subscription_expires_at += datetime.timedelta(days=5)
             else:
@@ -97,31 +131,36 @@ async def start_handler(message: Message, command: CommandObject):
             
             await session.commit()
             
+            log.info("qr_activated_successfully", code_hash=qr_hash, activation_count=user.qr_activations_count)
+            
             expires_str = user.subscription_expires_at.strftime("%d.%m.%Y")
             
-            await message.answer(
-                f"✅ <b>Доступ активирован!</b>\nДействует до: {expires_str}\n\nВыберите режим ниже 👇",
-                reply_markup=get_main_menu(qr_activations=user.qr_activations_count)
+            # Обновляем меню с учетом НОВЫХ кредитов
+            new_menu_kb = get_main_menu(
+                natal_credits=user.natal_chart_credits, # <--- ИСПРАВЛЕНО
+                is_admin=False
             )
             
-            # Проверка достижения
-            if user.qr_activations_count == 3:
-                await message.answer(
-                    "🎉 <b>Особое достижение!</b>\n\nВы активировали 3 QR-кода и открыли доступ к составлению **Натальной Карты**.\n"
-                    "Эта функция теперь доступна в главном меню в разделе 'Астролог'."
-                )
+            await message.answer(
+                f"✅ <b>Доступ активирован!</b>\nДействует до: {expires_str}" + bonus_msg,
+                reply_markup=new_menu_kb
+            )
+            
             return
 
-        # 3. Если просто /start без кода
+        # 3. Просто /start без кода
         now = datetime.datetime.now(datetime.timezone.utc)
-
+        
+        # Проверка подписки для обычных юзеров
         if user.subscription_expires_at and user.subscription_expires_at > now:
-             await message.answer("🏠 Главное меню:", reply_markup=get_main_menu(qr_activations=user.qr_activations_count))
+             await message.answer("🏠 Главное меню:", reply_markup=menu_kb)
         else:
              await message.answer("👋 Привет! Я REX Bot.\nДля доступа к диетологу и тренировкам отсканируйте QR-код с упаковки.")
 
 # --- ЗАПУСК ---
 async def main():
+    logger.info("service_started", service="bot_polling")
+    
     storage = RedisStorage(redis=redis_client)
     
     bot = Bot(
@@ -130,20 +169,44 @@ async def main():
     )
     dp = Dispatcher(storage=storage)
 
-    # ПОДКЛЮЧАЕМ РОУТЕРЫ
-    # Порядок важен: сначала специфичные, потом общие (survey ловит все mode_)
+    # --- ПОДКЛЮЧЕНИЕ MIDDLEWARE (ВАЖНО!) ---
+    # Ставим его ДО роутеров, чтобы проверять всё
+    dp.message.middleware(CheckSubscriptionMiddleware())
+    dp.callback_query.middleware(CheckSubscriptionMiddleware())
+    # ---------------------------------------
+
+    # ПОДКЛЮЧЕНИЕ РОУТЕРОВ
+    # Порядок критически важен:
+    # 1. Админка (самый приоритет)
+    dp.include_router(admin_router.router)
+    # 2. Функциональные роутеры
     dp.include_router(tracking_router.router)
     dp.include_router(dating_router.router)
     dp.include_router(profile_router.router)
     dp.include_router(survey_router.router)
     
+    # 3. Регистрация команды /start
     dp.message.register(start_handler, CommandStart())
+    
+    # Echo handler убран. Бот будет молчать на неизвестные сообщения.
 
-    print("🤖 Бот запущен!")
-    await dp.start_polling(bot)
+    logger.info("bot_polling_started")
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        logger.critical("bot_crashed", error=str(e))
+        await send_alert(e, context="Bot Polling Service")
+        raise e
 
 if __name__ == "__main__":
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())
+    
+    start_metrics_server(8002)
+    
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("service_stopped")
+    except Exception as e:
+        pass

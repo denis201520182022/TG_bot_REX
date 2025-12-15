@@ -10,6 +10,7 @@ from aiogram.types import (
 )
 from aiogram.enums import ContentType
 from sqlalchemy import select
+from src.config import settings
 
 # Сервисы и настройки
 from src.services.redis import redis_service 
@@ -33,13 +34,24 @@ MENU_MAPPING = {
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
+def is_admin(user_id: int) -> bool:
+    try:
+        admin_ids = [int(x) for x in settings.ADMIN_IDS.split(',')]
+        return user_id in admin_ids
+    except:
+        return False
+
 async def show_main_menu(message: Message, text: str, user_id: int):
-    """Показывает главное меню."""
-    activations = 0
-    async with async_session_maker() as session:
-        user = await session.get(User, user_id)
-        if user: activations = user.qr_activations_count
-    await message.answer(text, reply_markup=get_main_menu(qr_activations=activations))
+    credits = 0
+    # Админу рисуем 999 для красоты
+    if is_admin(user_id):
+        credits = 999
+    else:
+        async with async_session_maker() as session:
+            user = await session.get(User, user_id)
+            if user: credits = user.natal_chart_credits
+            
+    await message.answer(text, reply_markup=get_main_menu(natal_credits=credits, is_admin=is_admin(user_id)))
 
 def get_options_keyboard(options: list) -> ReplyKeyboardMarkup:
     """Генерирует клавиатуру с вариантами ответов."""
@@ -72,7 +84,7 @@ async def show_help(message: Message):
         "3. <b>Получите результат:</b>\n"
         "   — 🥦/💪 План питания или тренировок.\n"
         "   — 🔮 Гороскоп на сегодня.\n"
-        "   — ❤️ Поиск партнера (подбор в 12:00).\n\n"
+        "   — ❤️ Поиск партнера.\n\n"
         "📅 <b>Ежедневный трекинг:</b>\n"
         "Мы будем спрашивать о ваших успехах в 20:00.\n"
         "Включить/выключить его можно в меню Диетолога или Тренера."
@@ -120,7 +132,41 @@ async def toggle_tracking(callback: CallbackQuery):
 
 # --- ЗАПУСК АНКЕТЫ ---
 
-@router.message(F.text.in_(["❤️ Найти партнера", "🔮 Астро-прогноз", "🌟 Натальная карта"]))
+# 1. НАТАЛЬНАЯ КАРТА
+@router.message(F.text.contains("Натальная карта"))
+async def start_natal_chart(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    # Проверка для АДМИНА
+    if is_admin(user_id):
+        # Админ проходит без проверки кредитов
+        pass
+    else:
+        # Обычный юзер
+        async with async_session_maker() as session:
+            user = await session.get(User, user_id)
+            if user.natal_chart_credits < 1:
+                return await message.answer("❌ У вас нет попыток. Активируйте больше QR-кодов!")
+            
+    await _start_survey_logic(message, state, "natal_chart")
+
+# 2. ГОРОСКОП (Проверка на 1 раз в день)
+@router.message(F.text.contains("Астро-прогноз"))
+async def start_horoscope(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    
+    # Проверяем Redis ключ: horoscope_viewed:USER_ID:DATE
+    viewed = await redis_service.get(f"horoscope_viewed:{user_id}:{today_str}")
+    
+    # Если уже смотрел и НЕ админ (админу можно тестить)
+    if viewed and not is_admin(user_id):
+        return await message.answer("🔮 Звезды говорят только раз в день. Приходите завтра!")
+        
+    await _start_survey_logic(message, state, "horoscope")
+
+# 3. ОСТАЛЬНЫЕ (Дейтинг)
+@router.message(F.text.in_(["❤️ Найти партнера"]))
 async def start_survey_by_text(message: Message, state: FSMContext):
     mode = MENU_MAPPING[message.text]
     await _start_survey_logic(message, state, mode)
@@ -214,7 +260,6 @@ async def process_answer(message: Message, state: FSMContext):
             reply_markup=kb
         )
     else:
-        # ВОПРОСЫ ЗАКОНЧИЛИСЬ
         await state.update_data(answers=answers)
         await state.set_state(SurveyState.final_consent)
         
@@ -223,7 +268,7 @@ async def process_answer(message: Message, state: FSMContext):
             [InlineKeyboardButton(text="❌ Отказаться", callback_data="consent_no")]
         ])
         
-        await message.answer("...", reply_markup=ReplyKeyboardRemove()) # Убираем Reply клаву
+        await message.answer("...", reply_markup=ReplyKeyboardRemove()) 
         await message.answer(
             "📄 <b>Согласие на обработку данных:</b>\n\n"
             "Нажимая кнопку «Согласен(а)», вы подтверждаете свое согласие на обработку персональных данных.",
@@ -247,16 +292,26 @@ async def process_consent(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     
     async with async_session_maker() as session:
-        # 1. Получаем пользователя для проверки трекинга
         user = await session.get(User, user_id)
         
-        # Определяем, включен ли трекинг
+        # --- СПИСАНИЕ КРЕДИТА (НАТАЛЬНАЯ КАРТА) ---
+        if mode == 'natal_chart':
+            if not is_admin(user_id): # Админу бесплатно
+                if user.natal_chart_credits > 0:
+                    user.natal_chart_credits -= 1
+                else:
+                    await callback.answer("Ошибка: нет кредитов.", show_alert=True)
+                    return await show_main_menu(callback.message, "🏠 Главное меню:", user_id)
+        # ------------------------------------------
+
         is_tracking_enabled = False
         if mode == 'diet': is_tracking_enabled = user.is_diet_tracking
         elif mode == 'trainer': is_tracking_enabled = user.is_trainer_tracking
 
-        # 2. Сохраняем анкету
-        new_survey = UserSurvey(user_id=user_id, mode=mode, survey_config_id=1, answers=answers)
+        config_map = {'diet': 1, 'trainer': 2, 'dating': 3, 'horoscope': 4, 'natal_chart': 5}
+        config_id = config_map.get(mode, 1)
+
+        new_survey = UserSurvey(user_id=user_id, mode=mode, survey_config_id=config_id, answers=answers)
         session.add(new_survey)
         await session.flush()
         new_survey_id = new_survey.id
@@ -264,19 +319,16 @@ async def process_consent(callback: CallbackQuery, state: FSMContext):
     
     # --- ЛОГИКА ПОСЛЕ АНКЕТЫ ---
     if mode in ['diet', 'trainer', 'natal_chart']:
-        await callback.message.answer(f"✅ <b>Принято!</b>\nИИ анализирует данные... ⏳")
-        
-        # Отправляем в AI
+        await callback.message.answer(f"✅ <b>Принято!</b>\nОбрабатываем... ⏳")
         task_data = {"user_id": user_id, "mode": mode, "answers": answers, "survey_id": new_survey_id}
         await send_to_queue("q_ai_generation", task_data)
         
-        # ПРЕДЛАГАЕМ ТРЕКИНГ, если он ВЫКЛЮЧЕН (независимо от того, какая это по счету анкета)
         if mode in ['diet', 'trainer'] and not is_tracking_enabled:
             tracking_kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="👍 Да, хочу!", callback_data=f"toggle_tracking_{mode}"),
                 InlineKeyboardButton(text="👎 Не сейчас", callback_data="ignore")
             ]])
-            await asyncio.sleep(1) # Небольшая пауза перед вопросом
+            await asyncio.sleep(1) 
             await callback.message.answer(
                 "Хотите, чтобы я каждый день в 20:00 спрашивал о ваших успехах в этом режиме?",
                 reply_markup=tracking_kb
@@ -286,8 +338,11 @@ async def process_consent(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("✅ <b>Анкета знакомств сохранена!</b>\nЖдите предложений в 12:00.")
         
     elif mode == 'horoscope':
-        # Логика гороскопа
-        await callback.message.answer("✅ <b>Данные приняты!</b>\nИщу прогноз...")
+        # ФИКС: Записываем, что юзер получил гороскоп на сегодня
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
+        await redis_service.set(f"horoscope_viewed:{user_id}:{today_str}", "1", ex=86400)
+        
+        await callback.message.answer("✅ <b>Данные приняты!</b>\nСоставляем прогноз...")
         try:
             birth_date = datetime.datetime.strptime(answers.get("birth_date"), "%d.%m.%Y").date()
             user_sign = get_zodiac_sign(birth_date)
@@ -300,7 +355,7 @@ async def process_consent(callback: CallbackQuery, state: FSMContext):
                 await callback.message.answer(f"🔮 <b>Гороскоп для знака {sign_name}:</b>\n\n{horoscope_text}")
         except Exception as e:
             print(f"Ошибка гороскопа: {e}")
-            await callback.message.answer("Ошибка даты. Используйте формат ДД.ММ.ГГГГ")
+            await callback.message.answer("Ошибка даты.")
 
     await show_main_menu(callback.message, "🏠 Главное меню:", user_id)
     await callback.answer()

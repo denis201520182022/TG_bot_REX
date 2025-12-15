@@ -1,12 +1,42 @@
 global:
-  scrape_interval: 15s
+  scrape_interval: 15s     # Как часто забирать метрики
+  evaluation_interval: 15s # Как часто проверять правила алертов
 
 scrape_configs:
+  # 1. Сам Prometheus (здоровье мониторинга)
   - job_name: 'prometheus'
     static_configs:
       - targets: ['localhost:9090']
 
-  # cAdvisor собирает статистику по контейнерам (CPU, RAM)
+  # 2. cAdvisor (Железо: CPU, Память, Сеть всех контейнеров)
   - job_name: 'cadvisor'
     static_configs:
       - targets: ['cadvisor:8080']
+
+  # 3. RabbitMQ (Очереди, нагрузка на брокер)
+  # RabbitMQ image 3.8+ отдает метрики на порту 15692 по умолчанию
+  - job_name: 'rabbitmq'
+    static_configs:
+      - targets: ['rabbitmq:15692']
+
+  # --- НАШИ PYTHON СЕРВИСЫ ---
+
+  # 4. AI Worker (Port 8000)
+  - job_name: 'rex_worker_ai'
+    static_configs:
+      - targets: ['worker_ai:8000']
+
+  # 5. Sender Worker (Port 8001)
+  - job_name: 'rex_worker_sender'
+    static_configs:
+      - targets: ['worker_sender:8001']
+
+  # 6. Bot Polling (Port 8002)
+  - job_name: 'rex_bot'
+    static_configs:
+      - targets: ['bot_polling:8002']
+
+  # 7. Scheduler (Port 8003)
+  - job_name: 'rex_scheduler'
+    static_configs:
+      - targets: ['worker_scheduler:8003']

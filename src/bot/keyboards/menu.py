@@ -1,8 +1,9 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-def get_main_menu(qr_activations: int = 0) -> ReplyKeyboardMarkup:
+def get_main_menu(natal_credits: int = 0, is_admin: bool = False) -> ReplyKeyboardMarkup:
     """
     Главное меню бота (внизу экрана).
+    Принимает natal_credits (баланс попыток для натальной карты).
     """
     
     # Ряд 1: Основные сервисы
@@ -19,19 +20,24 @@ def get_main_menu(qr_activations: int = 0) -> ReplyKeyboardMarkup:
     
     # Ряд 3: Условная кнопка (Натальная карта)
     row3 = []
-    if qr_activations >= 3:
-        row3.append(KeyboardButton(text="🌟 Натальная карта"))
+    # Показываем кнопку, если есть хотя бы 1 кредит
+    if natal_credits > 0:
+        row3.append(KeyboardButton(text=f"🌟 Натальная карта ({natal_credits})"))
 
     # Ряд 4: Сервисные кнопки
-    # "Изменить анкету" УБРАЛИ. Осталась только справка.
     row4 = [
         KeyboardButton(text="ℹ️ Справка")
     ]
+    
+    # Ряд 5: Админка
+    row5 = []
+    if is_admin:
+        row5.append(KeyboardButton(text="🔒 Админка"))
 
     keyboard = [row1, row2]
-    if row3:
-        keyboard.append(row3)
+    if row3: keyboard.append(row3)
     keyboard.append(row4)
+    if row5: keyboard.append(row5)
 
     return ReplyKeyboardMarkup(
         keyboard=keyboard,

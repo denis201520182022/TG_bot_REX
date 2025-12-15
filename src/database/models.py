@@ -22,9 +22,9 @@ class User(Base):
     
     # Геймификация и доступы
     qr_activations_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    natal_chart_credits: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     
     # --- ТРЕКИНГ (РАЗДЕЛЬНЫЙ) ---
-    # Мы убрали старый is_tracking_enabled и добавили два новых
     is_diet_tracking: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     is_trainer_tracking: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     # ----------------------------
@@ -39,9 +39,9 @@ class User(Base):
 class QRCode(Base):
     __tablename__ = 'qr_codes'
 
-    code_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
-    batch_id: Mapped[str] = mapped_column(String(50))
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    code_hash: Mapped[str] = mapped_column(String(64), primary_key=True) # Уникальный хэш
+    batch_id: Mapped[str] = mapped_column(String(50)) # Номер партии
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True) # Глобальный рубильник
     
     created_at: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
     
@@ -50,14 +50,17 @@ class QRCode(Base):
     
     activated_by_user: Mapped["User"] = relationship(back_populates="qr_activation")
 
-# 3. Конфигурация анкет
+# 3. Конфигурация анкет (Версионирование)
 class SurveyConfig(Base):
     __tablename__ = 'survey_configs'
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    mode: Mapped[str] = mapped_column(String(20))
-    version: Mapped[str] = mapped_column(String(50))
+    mode: Mapped[str] = mapped_column(String(20)) # 'diet', 'fitness', 'dating'
+    version: Mapped[str] = mapped_column(String(50)) # хэш версии
+    
+    # Структура вопросов JSON: [{"q": "Вес?", "type": "int"}, ...]
     structure: Mapped[dict] = mapped_column(JSON) 
+    
     created_at: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
     is_current: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -67,10 +70,16 @@ class UserSurvey(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey('users.user_id'))
+    
     mode: Mapped[str] = mapped_column(String(20))
     survey_config_id: Mapped[int] = mapped_column(ForeignKey('survey_configs.id'))
+    
+    # Ответы: {"weight": 80, "goal": "loss"}
     answers: Mapped[dict] = mapped_column(JSON)
+    
+    # Результат от AI
     ai_recommendation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    
     created_at: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
     
     user: Mapped["User"] = relationship(back_populates="surveys")
@@ -80,25 +89,27 @@ class DatingMatch(Base):
     __tablename__ = 'dating_matches'
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey('users.user_id'))
-    target_user_id: Mapped[int] = mapped_column(BigInteger)
-    action: Mapped[str] = mapped_column(String(10))
+    
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.user_id')) # Кто лайкнул
+    target_user_id: Mapped[int] = mapped_column(BigInteger) # Кого лайкнул
+    
+    action: Mapped[str] = mapped_column(String(10)) # 'like', 'dislike'
     is_match: Mapped[bool] = mapped_column(Boolean, default=False)
+    
     created_at: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
 
-# 6. Ежедневный трекинг (Обновленный)
+# 6. Ежедневный трекинг
 class DailyTracking(Base):
     __tablename__ = 'daily_tracking'
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey('users.user_id'))
     
-    # --- НОВОЕ ПОЛЕ ---
+    # Режим ('diet' или 'trainer')
     mode: Mapped[str] = mapped_column(String(20), default="diet", server_default="diet") 
-    # 'diet' или 'trainer' - чтобы считать стрики раздельно
-    # ------------------
 
-    date: Mapped[datetime.date] = mapped_column(DateTime, default=func.current_date())
+    # ТУТ Я ПОМЕНЯЛ DateTime на Date для строгости
+    date: Mapped[datetime.date] = mapped_column(Date, default=func.current_date())
     status: Mapped[str] = mapped_column(String(20)) # 'success', 'partial', 'fail'
     
     created_at: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
