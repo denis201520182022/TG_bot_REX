@@ -109,7 +109,7 @@ async def show_mode_menu(message: Message):
         is_tracking = user.is_diet_tracking if mode == 'diet' else user.is_trainer_tracking
     
     await message.answer(
-        f"Вы выбрали режим <b>{mode.capitalize()}</b>. Что делаем?",
+        f"Режим <b>{mode.capitalize()}</b>. Что делаем?",
         reply_markup=get_mode_menu_kb(mode, is_tracking)
     )
 
