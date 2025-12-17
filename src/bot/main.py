@@ -117,12 +117,15 @@ async def start_handler(message: Message, command: CommandObject):
             
             # Логика начисления КРЕДИТОВ (каждый 3-й код)
             bonus_msg = ""
-            if user.qr_activations_count % 3 == 0:
+            # Даем кредит ТОЛЬКО если это 5-я активация
+            if user.qr_activations_count == 5:
                 user.natal_chart_credits += 1
-                bonus_msg = "\n\n🌟 <b>Бонус!</b> Вы получили 1 попытку для составления Натальной Карты!"
-            else:
-                bonus_msg = f"\n\n(Активируйте еще {3 - (user.qr_activations_count % 3)} шт., чтобы получить Натальную Карту)"
-
+                bonus_msg = "\n\n🌟 <b>Поздравляем!</b> Вы активировали 5 кодов! Вам доступна <b>Натальная карта</b> (1 раз)."
+            elif user.qr_activations_count < 5:
+                left = 5 - user.qr_activations_count
+                bonus_msg = f"\n\n(Активируйте еще {left} шт., чтобы открыть Натальную карту)"
+            # Если > 5, то ничего не пишем и кредиты не даем
+            # ----------------------------------------
             # Обновляем подписку
             if user.subscription_expires_at and user.subscription_expires_at > now:
                 user.subscription_expires_at += datetime.timedelta(days=5)

@@ -27,6 +27,7 @@ class User(Base):
     # --- ТРЕКИНГ (РАЗДЕЛЬНЫЙ) ---
     is_diet_tracking: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     is_trainer_tracking: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    has_accepted_policy: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     # ----------------------------
 
     created_at: Mapped[datetime.datetime] = mapped_column(server_default=func.now())

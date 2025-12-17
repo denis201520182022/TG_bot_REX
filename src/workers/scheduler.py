@@ -102,11 +102,11 @@ async def send_diet_checkin():
         users = (await session.execute(stmt)).scalars().all()
         
         keyboard = {
-            "inline_keyboard": [[
-                {"text": "✅ Всё по плану", "callback_data": "track_diet_success"},
-                {"text": "⚠️ Частично", "callback_data": "track_diet_partial"},
-                {"text": "❌ Срыв", "callback_data": "track_diet_fail"}
-            ]]
+            "inline_keyboard": [
+                [{"text": "✅ Всё по плану", "callback_data": "track_diet_success"}],
+                [{"text": "⚠️ Частично", "callback_data": "track_diet_partial"}],
+                [{"text": "❌ Срыв", "callback_data": "track_diet_fail"}]
+            ]
         }
 
         count = 0
